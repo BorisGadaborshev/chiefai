@@ -18,6 +18,17 @@ const polzaModel = process.env.POLZA_MODEL || 'openai/gpt-4o-mini'
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN
 const telegramMaxAgeSeconds = Number(process.env.TELEGRAM_INIT_MAX_AGE_SECONDS || 86400)
 const telegramDevBypass = process.env.TELEGRAM_DEV_BYPASS === 'true'
+const requestCostStars = Number(process.env.REQUEST_COST_STARS || 2)
+const newUserStartStars = Number(process.env.NEW_USER_START_STARS || 20)
+const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || ''
+const balancesPath = path.resolve(__dirname, '../data/balances.json')
+const invoicesSecret = process.env.INVOICES_SECRET || polzaApiKey
+
+const topupPackages = [
+  { id: 'topup_25', stars: 25, priceXtr: 25, label: '25⭐' },
+  { id: 'topup_100', stars: 100, priceXtr: 100, label: '100⭐' },
+  { id: 'topup_250', stars: 250, priceXtr: 250, label: '250⭐' },
+]
 
 if (!polzaApiKey) {
   throw new Error('POLZA_API_KEY is missing. Set it in .env.local')
@@ -62,6 +73,39 @@ function isValidTelegramInitData(initData) {
   return crypto.timingSafeEqual(hashBuffer, calculatedBuffer)
 }
 
+function callTelegramApi(method, payload) {
+  if (!telegramBotToken) {
+    throw new Error('TELEGRAM_BOT_TOKEN is missing')
+  }
+
+  return fetch(`https://api.telegram.org/bot${telegramBotToken}/${method}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+}
+
+function extractTelegramUserId(initData) {
+  try {
+    const params = new URLSearchParams(initData)
+    const rawUser = params.get('user')
+    if (!rawUser) {
+      return null
+    }
+
+    const user = JSON.parse(rawUser)
+    if (!user?.id) {
+      return null
+    }
+
+    return String(user.id)
+  } catch {
+    return null
+  }
+}
+
 function isLocalDevRequest(req) {
   const host = String(req.hostname || '').toLowerCase()
   const ip = String(req.ip || '').replace('::ffff:', '')
@@ -72,6 +116,137 @@ function isLocalDevRequest(req) {
   return localHosts.has(host) || localIps.has(ip)
 }
 
+function ensureBalancesStorage() {
+  const dir = path.dirname(balancesPath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+  if (!fs.existsSync(balancesPath)) {
+    fs.writeFileSync(balancesPath, '{}', 'utf8')
+  }
+}
+
+function loadBalances() {
+  ensureBalancesStorage()
+
+  try {
+    const raw = fs.readFileSync(balancesPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveBalances(balances) {
+  fs.writeFileSync(balancesPath, JSON.stringify(balances, null, 2), 'utf8')
+}
+
+function getOrCreateWallet(balances, userId) {
+  if (!balances[userId]) {
+    balances[userId] = {
+      stars: newUserStartStars,
+      spent: 0,
+      requests: 0,
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  return balances[userId]
+}
+
+function getBalance(userId) {
+  const balances = loadBalances()
+  const wallet = getOrCreateWallet(balances, userId)
+  saveBalances(balances)
+
+  return {
+    stars: Number(wallet.stars || 0),
+    requestCostStars,
+  }
+}
+
+function chargeStars(userId, amount) {
+  const balances = loadBalances()
+  const wallet = getOrCreateWallet(balances, userId)
+  const stars = Number(wallet.stars || 0)
+
+  if (stars < amount) {
+    saveBalances(balances)
+    return {
+      ok: false,
+      balance: stars,
+      requestCostStars,
+    }
+  }
+
+  wallet.stars = stars - amount
+  wallet.spent = Number(wallet.spent || 0) + amount
+  wallet.requests = Number(wallet.requests || 0) + 1
+  wallet.updatedAt = new Date().toISOString()
+  saveBalances(balances)
+
+  return {
+    ok: true,
+    balance: wallet.stars,
+    requestCostStars,
+  }
+}
+
+function refundStars(userId, amount) {
+  const balances = loadBalances()
+  const wallet = getOrCreateWallet(balances, userId)
+  wallet.stars = Number(wallet.stars || 0) + amount
+  wallet.spent = Math.max(0, Number(wallet.spent || 0) - amount)
+  wallet.requests = Math.max(0, Number(wallet.requests || 0) - 1)
+  wallet.updatedAt = new Date().toISOString()
+  saveBalances(balances)
+}
+
+function addStars(userId, amount) {
+  const balances = loadBalances()
+  const wallet = getOrCreateWallet(balances, userId)
+  wallet.stars = Number(wallet.stars || 0) + amount
+  wallet.updatedAt = new Date().toISOString()
+  saveBalances(balances)
+
+  return wallet.stars
+}
+
+function createInvoicePayload(userId, packageId, stars) {
+  const nonce = crypto.randomBytes(8).toString('hex')
+  const base = `${userId}:${packageId}:${stars}:${nonce}`
+  const signature = crypto.createHmac('sha256', invoicesSecret).update(base).digest('hex')
+  return `${base}:${signature}`
+}
+
+function parseAndVerifyInvoicePayload(payload) {
+  const parts = String(payload || '').split(':')
+  if (parts.length !== 5) {
+    return null
+  }
+
+  const [userId, packageId, starsRaw, nonce, signature] = parts
+  const base = `${userId}:${packageId}:${starsRaw}:${nonce}`
+  const expectedSignature = crypto.createHmac('sha256', invoicesSecret).update(base).digest('hex')
+
+  const signatureBuffer = Buffer.from(signature, 'hex')
+  const expectedBuffer = Buffer.from(expectedSignature, 'hex')
+  if (signatureBuffer.length !== expectedBuffer.length) {
+    return null
+  }
+  if (!crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
+    return null
+  }
+
+  const stars = Number(starsRaw)
+  if (!Number.isFinite(stars) || stars <= 0) {
+    return null
+  }
+
+  return { userId, packageId, stars }
+}
+
 app.use(cors())
 app.use(express.json({ limit: '25mb' }))
 
@@ -79,8 +254,48 @@ if (distExists) {
   app.use(express.static(distPath))
 }
 
+app.post('/telegram/webhook', async (req, res) => {
+  const secretHeader = req.get('x-telegram-bot-api-secret-token') || ''
+  if (telegramWebhookSecret && secretHeader !== telegramWebhookSecret) {
+    return res.sendStatus(403)
+  }
+
+  const update = req.body || {}
+
+  if (update.pre_checkout_query) {
+    const preCheckoutQuery = update.pre_checkout_query
+    try {
+      const parsed = parseAndVerifyInvoicePayload(preCheckoutQuery.invoice_payload)
+      const ok = Boolean(parsed)
+      const telegramResponse = await callTelegramApi('answerPreCheckoutQuery', {
+        pre_checkout_query_id: preCheckoutQuery.id,
+        ok,
+        error_message: ok ? undefined : 'Ошибка проверки платежа. Попробуйте снова.',
+      })
+
+      const data = await telegramResponse.json()
+      if (!data.ok) {
+        console.error('answerPreCheckoutQuery failed', data)
+      }
+    } catch (error) {
+      console.error('pre_checkout_query handling failed', error)
+    }
+  }
+
+  if (update.message?.successful_payment) {
+    const successfulPayment = update.message.successful_payment
+    const parsed = parseAndVerifyInvoicePayload(successfulPayment.invoice_payload)
+    if (parsed) {
+      addStars(parsed.userId, parsed.stars)
+    }
+  }
+
+  return res.sendStatus(200)
+})
+
 app.use('/api', (req, res, next) => {
   if (telegramDevBypass && isLocalDevRequest(req)) {
+    req.userId = 'local-dev'
     return next()
   }
 
@@ -91,10 +306,77 @@ app.use('/api', (req, res, next) => {
     })
   }
 
+  const userId = extractTelegramUserId(initData)
+  if (!userId) {
+    return res.status(403).json({
+      error: 'Не удалось определить пользователя Telegram.',
+    })
+  }
+
+  req.userId = userId
   next()
 })
 
+app.get('/api/balance', (req, res) => {
+  const userId = req.userId || 'unknown'
+  const balance = getBalance(String(userId))
+  return res.json({
+    ...balance,
+    topupPackages,
+  })
+})
+
+app.post('/api/stars/invoice', async (req, res) => {
+  const userId = String(req.userId || 'unknown')
+  const packageId = String(req.body?.packageId || '')
+  const selectedPackage = topupPackages.find((item) => item.id === packageId)
+
+  if (!selectedPackage) {
+    return res.status(400).json({ error: 'Некорректный пакет пополнения.' })
+  }
+
+  try {
+    const invoicePayload = createInvoicePayload(userId, selectedPackage.id, selectedPackage.stars)
+    const telegramResponse = await callTelegramApi('createInvoiceLink', {
+      title: `Пополнение баланса ${selectedPackage.label}`,
+      description: `Пополнение на ${selectedPackage.stars}⭐ для Chief Ai`,
+      payload: invoicePayload,
+      currency: 'XTR',
+      prices: [
+        {
+          label: `${selectedPackage.stars} stars`,
+          amount: selectedPackage.priceXtr,
+        },
+      ],
+    })
+    const data = await telegramResponse.json()
+
+    if (!data.ok || typeof data.result !== 'string') {
+      return res.status(502).json({
+        error: 'Не удалось создать инвойс Telegram Stars.',
+        details: data.description || 'Unknown Telegram API error',
+      })
+    }
+
+    return res.json({ invoiceLink: data.result })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Ошибка создания инвойса'
+    return res.status(500).json({ error: message })
+  }
+})
+
 app.post('/api/recipes', async (req, res) => {
+  const userId = String(req.userId || 'unknown')
+  const charge = chargeStars(userId, requestCostStars)
+  if (!charge.ok) {
+    return res.status(402).json({
+      error: `Недостаточно звезд. Нужно ${charge.requestCostStars}⭐ за запрос.`,
+      balance: charge.balance,
+      requestCostStars: charge.requestCostStars,
+    })
+  }
+
+  let refundRequired = true
   const { products = [], imageBase64, preferences } = req.body ?? {}
   const cleanProducts = Array.isArray(products)
     ? products
@@ -106,6 +388,7 @@ app.post('/api/recipes', async (req, res) => {
     typeof preferences === 'string' ? preferences.trim().replace(/\s+/g, ' ').slice(0, 500) : ''
 
   if (cleanProducts.length === 0 && !imageBase64) {
+    refundStars(userId, requestCostStars)
     return res.status(400).json({ error: 'Передайте products или imageBase64.' })
   }
 
@@ -185,6 +468,7 @@ app.post('/api/recipes', async (req, res) => {
 
     if (!polzaResponse.ok) {
       const errorText = await polzaResponse.text()
+      refundStars(userId, requestCostStars)
       return res.status(502).json({
         error: 'Ошибка ответа polza.ai',
         details: errorText.slice(0, 1000),
@@ -195,11 +479,13 @@ app.post('/api/recipes', async (req, res) => {
     const content = completion?.choices?.[0]?.message?.content
 
     if (typeof content !== 'string') {
+      refundStars(userId, requestCostStars)
       return res.status(500).json({ error: 'Некорректный формат ответа от polza.ai' })
     }
 
     try {
       const parsed = JSON.parse(content)
+      refundRequired = false
       return res.json({
         recipes: Array.isArray(parsed?.recipes) ? parsed.recipes : [],
         note:
@@ -208,14 +494,22 @@ app.post('/api/recipes', async (req, res) => {
             : fallbackToTextOnly
               ? 'Рецепты подобраны по списку продуктов (анализ фото временно недоступен).'
               : undefined,
+        balance: charge.balance,
+        requestCostStars,
       })
     } catch {
+      refundRequired = false
       return res.json({
         recipes: [],
         rawText: content,
+        balance: charge.balance,
+        requestCostStars,
       })
     }
   } catch (error) {
+    if (refundRequired) {
+      refundStars(userId, requestCostStars)
+    }
     const message = error instanceof Error ? error.message : 'Неизвестная ошибка сервера'
     return res.status(500).json({ error: message })
   }

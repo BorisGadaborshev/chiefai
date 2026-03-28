@@ -13,12 +13,22 @@ type RecipesResponse = {
   recipes: Recipe[]
   note?: string
   rawText?: string
+  balance?: number
+  requestCostStars?: number
+}
+
+type TopupPackage = {
+  id: string
+  stars: number
+  priceXtr: number
+  label: string
 }
 
 type TelegramWebApp = {
   initData: string
   ready?: () => void
   expand?: () => void
+  openInvoice?: (url: string, callback?: (status: string) => void) => void
 }
 
 type TelegramWindow = Window & {
@@ -96,11 +106,54 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [matchedRecipes, setMatchedRecipes] = useState<Recipe[]>([])
+  const [starsBalance, setStarsBalance] = useState<number | null>(null)
+  const [requestCostStars, setRequestCostStars] = useState(2)
+  const [topupPackages, setTopupPackages] = useState<TopupPackage[]>([])
+  const [topupLoadingId, setTopupLoadingId] = useState<string | null>(null)
 
   useEffect(() => {
     telegramWebApp?.ready?.()
     telegramWebApp?.expand?.()
   }, [telegramWebApp])
+
+  useEffect(() => {
+    if (!isAllowedLaunch) {
+      return
+    }
+
+    const loadBalance = async () => {
+      try {
+        const response = await fetch('/api/balance', {
+          headers: {
+            'X-Telegram-Init-Data': telegramInitData,
+          },
+        })
+        if (!response.ok) {
+          return
+        }
+
+        const payload = (await response.json()) as {
+          stars?: number
+          requestCostStars?: number
+          topupPackages?: TopupPackage[]
+        }
+
+        if (typeof payload.stars === 'number') {
+          setStarsBalance(payload.stars)
+        }
+        if (typeof payload.requestCostStars === 'number') {
+          setRequestCostStars(payload.requestCostStars)
+        }
+        if (Array.isArray(payload.topupPackages)) {
+          setTopupPackages(payload.topupPackages)
+        }
+      } catch {
+        // Balance fetch is non-blocking; UI can still render without it.
+      }
+    }
+
+    void loadBalance()
+  }, [isAllowedLaunch, telegramInitData])
 
   useEffect(() => {
     if (!imageFile) {
@@ -155,6 +208,12 @@ function App() {
       }
 
       if (!response.ok) {
+        if (typeof payload.balance === 'number') {
+          setStarsBalance(payload.balance)
+        }
+        if (typeof payload.requestCostStars === 'number') {
+          setRequestCostStars(payload.requestCostStars)
+        }
         const errorMessage = payload.details
           ? `${payload.error}: ${payload.details}`
           : payload.error || 'Ошибка запроса к серверу'
@@ -163,12 +222,82 @@ function App() {
 
       setMatchedRecipes(Array.isArray(payload.recipes) ? payload.recipes : [])
       setNote(payload.note ?? payload.rawText ?? null)
+      if (typeof payload.balance === 'number') {
+        setStarsBalance(payload.balance)
+      }
+      if (typeof payload.requestCostStars === 'number') {
+        setRequestCostStars(payload.requestCostStars)
+      }
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : 'Неизвестная ошибка запроса'
       setError(message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const onTopup = async (packageId: string) => {
+    if (!telegramWebApp?.openInvoice) {
+      setError('Пополнение доступно только внутри Telegram Mini App.')
+      return
+    }
+
+    setTopupLoadingId(packageId)
+    setError(null)
+
+    try {
+      const response = await fetch('/api/stars/invoice', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': telegramInitData,
+        },
+        body: JSON.stringify({ packageId }),
+      })
+      const payload = (await response.json()) as { invoiceLink?: string; error?: string }
+
+      if (!response.ok || !payload.invoiceLink) {
+        throw new Error(payload.error || 'Не удалось создать инвойс')
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        telegramWebApp.openInvoice?.(payload.invoiceLink!, (status) => {
+          if (status === 'paid') {
+            resolve()
+            return
+          }
+          if (status === 'cancelled') {
+            reject(new Error('Платеж отменен.'))
+            return
+          }
+          reject(new Error(`Не удалось завершить платеж (${status}).`))
+        })
+      })
+
+      const balanceResponse = await fetch('/api/balance', {
+        headers: {
+          'X-Telegram-Init-Data': telegramInitData,
+        },
+      })
+      if (balanceResponse.ok) {
+        const balancePayload = (await balanceResponse.json()) as {
+          stars?: number
+          requestCostStars?: number
+        }
+        if (typeof balancePayload.stars === 'number') {
+          setStarsBalance(balancePayload.stars)
+        }
+        if (typeof balancePayload.requestCostStars === 'number') {
+          setRequestCostStars(balancePayload.requestCostStars)
+        }
+      }
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Ошибка пополнения баланса'
+      setError(message)
+    } finally {
+      setTopupLoadingId(null)
     }
   }
 
@@ -194,81 +323,100 @@ function App() {
             <h1>Chief Ai</h1>
           </Header>
 
-        <Section>
-          <SectionTitle>1) Добавь фото продуктов</SectionTitle>
-          <PreviewArea>
-            {imagePreview ? (
-              <Preview src={imagePreview} alt="Продукты" />
-            ) : (
-              <PreviewPlaceholder>Изображение пока не выбрано</PreviewPlaceholder>
+          <Section>
+            <SectionTitle>1) Добавь фото продуктов</SectionTitle>
+            <PreviewArea>
+              {imagePreview ? (
+                <Preview src={imagePreview} alt="Продукты" />
+              ) : (
+                <PreviewPlaceholder>Изображение пока не выбрано</PreviewPlaceholder>
+              )}
+            </PreviewArea>
+            <UploadLabel>
+              <input type="file" accept="image/*" onChange={onPhotoChange} />
+              Выбрать фото
+            </UploadLabel>
+            {imageFile && (
+              <Hint>
+                Фото загружено: <strong>{imageFile.name}</strong>
+              </Hint>
             )}
-          </PreviewArea>
-          <UploadLabel>
-            <input type="file" accept="image/*" onChange={onPhotoChange} />
-            Выбрать фото
-          </UploadLabel>
-          {imageFile && (
-            <Hint>
-              Фото загружено: <strong>{imageFile.name}</strong>
-            </Hint>
-          )}
-        </Section>
+          </Section>
 
-        <Section>
-          <SectionTitle>2) Введи список продуктов</SectionTitle>
-          <Accordion>
-            <AccordionSummary>Открыть список продуктов</AccordionSummary>
-            <Textarea
-              value={productsText}
-              onChange={(event) => setProductsText(event.target.value)}
-              placeholder="Например: яйца, сыр, помидоры"
-            />
-          </Accordion>
-        </Section>
+          <Section>
+            <SectionTitle>2) Введи список продуктов</SectionTitle>
+            <Accordion>
+              <AccordionSummary>Открыть список продуктов</AccordionSummary>
+              <Textarea
+                value={productsText}
+                onChange={(event) => setProductsText(event.target.value)}
+                placeholder="Например: яйца, сыр, помидоры"
+              />
+            </Accordion>
+          </Section>
 
-        <Section>
-          <SectionTitle>3) Пожелания</SectionTitle>
-          <Accordion>
-            <AccordionSummary>Открыть пожелания и ограничения</AccordionSummary>
-            <Textarea
-              value={preferencesText}
-              onChange={(event) => setPreferencesText(event.target.value)}
-              placeholder="Пожелания: здоровое питание, исключить лук, без сахара"
-            />
-          </Accordion>
-        </Section>
+          <Section>
+            <SectionTitle>3) Пожелания</SectionTitle>
+            <Accordion>
+              <AccordionSummary>Открыть пожелания и ограничения</AccordionSummary>
+              <Textarea
+                value={preferencesText}
+                onChange={(event) => setPreferencesText(event.target.value)}
+                placeholder="Пожелания: здоровое питание, исключить лук, без сахара"
+              />
+            </Accordion>
+          </Section>
 
-        <ActionRow>
-          <PrimaryButton type="button" onClick={onFindRecipes} disabled={loading}>
-            {loading ? 'Ищем...' : 'Подобрать рецепты'}
-          </PrimaryButton>
-          <ProductsInfo>
-            Продукты: {allProducts.length > 0 ? allProducts.join(', ') : 'не добавлены'}
-          </ProductsInfo>
-          {preferencesText.trim() && <ProductsInfo>Пожелания: {preferencesText.trim()}</ProductsInfo>}
-        </ActionRow>
-        {error && <ErrorText>{error}</ErrorText>}
+          <ActionRow>
+            <PrimaryButton type="button" onClick={onFindRecipes} disabled={loading}>
+              {loading ? 'Ищем...' : `Подобрать рецепты (${requestCostStars}⭐)`}
+            </PrimaryButton>
+            <ProductsInfo>
+              Баланс: {typeof starsBalance === 'number' ? `${starsBalance}⭐` : '...'}
+            </ProductsInfo>
+            <ProductsInfo>
+              Продукты: {allProducts.length > 0 ? allProducts.join(', ') : 'не добавлены'}
+            </ProductsInfo>
+            {preferencesText.trim() && (
+              <ProductsInfo>Пожелания: {preferencesText.trim()}</ProductsInfo>
+            )}
+          </ActionRow>
+          <TopupRow>
+            {topupPackages.map((item) => (
+              <TopupButton
+                key={item.id}
+                type="button"
+                disabled={topupLoadingId !== null}
+                onClick={() => onTopup(item.id)}
+              >
+                {topupLoadingId === item.id
+                  ? 'Ожидание оплаты...'
+                  : `Пополнить ${item.stars}⭐ за ${item.priceXtr}⭐`}
+              </TopupButton>
+            ))}
+          </TopupRow>
+          {error && <ErrorText>{error}</ErrorText>}
 
-        <Section>
-          <SectionTitle>4) Подходящие рецепты</SectionTitle>
-          {!loading && matchedRecipes.length === 0 && !error && (
-            <EmptyState>
-              Пока не нашел подходящих рецептов. Добавь больше продуктов или измени список.
-            </EmptyState>
-          )}
-          {matchedRecipes.map((recipe) => (
-            <RecipeCard key={recipe.id}>
-              <RecipeTitle>{recipe.title}</RecipeTitle>
-              <RecipeMeta>Ингредиенты: {recipe.ingredients.join(', ')}</RecipeMeta>
-              <Steps>
-                {recipe.steps.map((step) => (
-                  <li key={step}>{step}</li>
-                ))}
-              </Steps>
-            </RecipeCard>
-          ))}
-          {note && <Hint>{note}</Hint>}
-        </Section>
+          <Section>
+            <SectionTitle>4) Подходящие рецепты</SectionTitle>
+            {!loading && matchedRecipes.length === 0 && !error && (
+              <EmptyState>
+                Пока не нашел подходящих рецептов. Добавь больше продуктов или измени список.
+              </EmptyState>
+            )}
+            {matchedRecipes.map((recipe) => (
+              <RecipeCard key={recipe.id}>
+                <RecipeTitle>{recipe.title}</RecipeTitle>
+                <RecipeMeta>Ингредиенты: {recipe.ingredients.join(', ')}</RecipeMeta>
+                <Steps>
+                  {recipe.steps.map((step) => (
+                    <li key={step}>{step}</li>
+                  ))}
+                </Steps>
+              </RecipeCard>
+            ))}
+            {note && <Hint>{note}</Hint>}
+          </Section>
         </Card>
       )}
     </Page>
@@ -392,6 +540,22 @@ const ActionRow = styled.div`
   flex-wrap: wrap;
   gap: 10px;
   align-items: center;
+`
+
+const TopupRow = styled.div`
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+`
+
+const TopupButton = styled.button`
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: #dbe9ff;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
 `
 
 const PrimaryButton = styled.button`
