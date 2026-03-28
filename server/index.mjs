@@ -22,7 +22,11 @@ const requestCostStars = Number(process.env.REQUEST_COST_STARS || 2)
 const newUserStartStars = Number(process.env.NEW_USER_START_STARS || 20)
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || ''
 const balancesPath = path.resolve(__dirname, '../data/balances.json')
+const promoUsagePath = path.resolve(__dirname, '../data/promo-usage.json')
 const invoicesSecret = process.env.INVOICES_SECRET || polzaApiKey
+const fixedPromoCode = 'BEASTOLOLO'
+const promoGrantStars = Number(process.env.PROMO_GRANT_STARS || requestCostStars)
+const promoMaxUses = Number(process.env.PROMO_MAX_USES || 10)
 
 const topupPackages = [
   { id: 'topup_25', stars: 25, priceXtr: 25, label: '25⭐' },
@@ -126,6 +130,31 @@ function ensureBalancesStorage() {
   }
 }
 
+function ensurePromoUsageStorage() {
+  const dir = path.dirname(promoUsagePath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+  if (!fs.existsSync(promoUsagePath)) {
+    fs.writeFileSync(promoUsagePath, '{}', 'utf8')
+  }
+}
+
+function loadPromoUsage() {
+  ensurePromoUsageStorage()
+  try {
+    const raw = fs.readFileSync(promoUsagePath, 'utf8')
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function savePromoUsage(usage) {
+  fs.writeFileSync(promoUsagePath, JSON.stringify(usage, null, 2), 'utf8')
+}
+
 function loadBalances() {
   ensureBalancesStorage()
 
@@ -148,8 +177,13 @@ function getOrCreateWallet(balances, userId) {
       stars: newUserStartStars,
       spent: 0,
       requests: 0,
+      redeemedPromos: [],
       updatedAt: new Date().toISOString(),
     }
+  }
+
+  if (!Array.isArray(balances[userId].redeemedPromos)) {
+    balances[userId].redeemedPromos = []
   }
 
   return balances[userId]
@@ -163,6 +197,7 @@ function getBalance(userId) {
   return {
     stars: Number(wallet.stars || 0),
     requestCostStars,
+    promoRedeemed: wallet.redeemedPromos.includes(fixedPromoCode),
   }
 }
 
@@ -211,6 +246,50 @@ function addStars(userId, amount) {
   saveBalances(balances)
 
   return wallet.stars
+}
+
+function redeemPromo(userId, promoCodeRaw) {
+  const promoCode = String(promoCodeRaw || '').trim().toUpperCase()
+  if (promoCode !== fixedPromoCode) {
+    return {
+      ok: false,
+      reason: 'invalid',
+    }
+  }
+
+  const balances = loadBalances()
+  const wallet = getOrCreateWallet(balances, userId)
+  const promoUsage = loadPromoUsage()
+  const currentUsage = Number(promoUsage[fixedPromoCode] || 0)
+
+  if (currentUsage >= promoMaxUses) {
+    return {
+      ok: false,
+      reason: 'limit_reached',
+      balance: Number(wallet.stars || 0),
+    }
+  }
+
+  if (wallet.redeemedPromos.includes(fixedPromoCode)) {
+    return {
+      ok: false,
+      reason: 'already_used',
+      balance: Number(wallet.stars || 0),
+    }
+  }
+
+  wallet.redeemedPromos.push(fixedPromoCode)
+  wallet.stars = Number(wallet.stars || 0) + promoGrantStars
+  wallet.updatedAt = new Date().toISOString()
+  saveBalances(balances)
+  promoUsage[fixedPromoCode] = currentUsage + 1
+  savePromoUsage(promoUsage)
+
+  return {
+    ok: true,
+    balance: wallet.stars,
+    promoGrantStars,
+  }
 }
 
 function createInvoicePayload(userId, packageId, stars) {
@@ -323,6 +402,37 @@ app.get('/api/balance', (req, res) => {
   return res.json({
     ...balance,
     topupPackages,
+  })
+})
+
+app.post('/api/promo/redeem', (req, res) => {
+  const userId = String(req.userId || 'unknown')
+  const code = String(req.body?.code || '')
+  const result = redeemPromo(userId, code)
+
+  if (!result.ok) {
+    if (result.reason === 'already_used') {
+      return res.status(409).json({
+        error: 'Этот промокод уже использован.',
+        balance: result.balance,
+      })
+    }
+    if (result.reason === 'limit_reached') {
+      return res.status(409).json({
+        error: 'Промокод больше недоступен.',
+        balance: result.balance,
+      })
+    }
+
+    return res.status(400).json({
+      error: 'Неверный промокод.',
+    })
+  }
+
+  return res.json({
+    message: `Промокод активирован. Начислено ${result.promoGrantStars}⭐.`,
+    balance: result.balance,
+    promoGrantStars: result.promoGrantStars,
   })
 })
 

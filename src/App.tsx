@@ -17,6 +17,12 @@ type RecipesResponse = {
   requestCostStars?: number
 }
 
+type BalanceResponse = {
+  stars?: number
+  requestCostStars?: number
+  topupPackages?: TopupPackage[]
+}
+
 type TopupPackage = {
   id: string
   stars: number
@@ -110,6 +116,9 @@ function App() {
   const [requestCostStars, setRequestCostStars] = useState(2)
   const [topupPackages, setTopupPackages] = useState<TopupPackage[]>([])
   const [topupLoadingId, setTopupLoadingId] = useState<string | null>(null)
+  const [promoCode, setPromoCode] = useState('')
+  const [promoLoading, setPromoLoading] = useState(false)
+  const [promoMessage, setPromoMessage] = useState<string | null>(null)
 
   useEffect(() => {
     telegramWebApp?.ready?.()
@@ -132,11 +141,7 @@ function App() {
           return
         }
 
-        const payload = (await response.json()) as {
-          stars?: number
-          requestCostStars?: number
-          topupPackages?: TopupPackage[]
-        }
+        const payload = (await response.json()) as BalanceResponse
 
         if (typeof payload.stars === 'number') {
           setStarsBalance(payload.stars)
@@ -301,6 +306,50 @@ function App() {
     }
   }
 
+  const onRedeemPromo = async () => {
+    const code = promoCode.trim()
+    if (!code) {
+      setPromoMessage('Введи промокод.')
+      return
+    }
+
+    setPromoLoading(true)
+    setPromoMessage(null)
+    setError(null)
+
+    try {
+      const response = await fetch('/api/promo/redeem', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': telegramInitData,
+        },
+        body: JSON.stringify({ code }),
+      })
+      const payload = (await response.json()) as {
+        message?: string
+        error?: string
+        balance?: number
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error || 'Не удалось активировать промокод')
+      }
+
+      if (typeof payload.balance === 'number') {
+        setStarsBalance(payload.balance)
+      }
+      setPromoCode('')
+      setPromoMessage(payload.message || 'Промокод активирован.')
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Ошибка активации промокода'
+      setPromoMessage(message)
+    } finally {
+      setPromoLoading(false)
+    }
+  }
+
   return (
     <Page>
       {!isAllowedLaunch && (
@@ -395,6 +444,17 @@ function App() {
               </TopupButton>
             ))}
           </TopupRow>
+          <PromoRow>
+            <PromoInput
+              value={promoCode}
+              onChange={(event) => setPromoCode(event.target.value)}
+              placeholder="Введите промокод"
+            />
+            <TopupButton type="button" disabled={promoLoading} onClick={onRedeemPromo}>
+              {promoLoading ? 'Проверяем...' : 'Активировать промокод'}
+            </TopupButton>
+          </PromoRow>
+          {promoMessage && <Hint>{promoMessage}</Hint>}
           {error && <ErrorText>{error}</ErrorText>}
 
           <Section>
@@ -547,6 +607,24 @@ const TopupRow = styled.div`
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+`
+
+const PromoRow = styled.div`
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+`
+
+const PromoInput = styled.input`
+  min-width: 230px;
+  flex: 1 1 260px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: #ecf3ff;
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
 `
 
 const TopupButton = styled.button`
