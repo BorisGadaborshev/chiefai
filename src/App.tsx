@@ -113,7 +113,7 @@ function App() {
   const [note, setNote] = useState<string | null>(null)
   const [matchedRecipes, setMatchedRecipes] = useState<Recipe[]>([])
   const [starsBalance, setStarsBalance] = useState<number | null>(null)
-  const [requestCostStars, setRequestCostStars] = useState(2)
+  const [requestCostStars, setRequestCostStars] = useState(3)
   const [topupPackages, setTopupPackages] = useState<TopupPackage[]>([])
   const [topupLoadingId, setTopupLoadingId] = useState<string | null>(null)
   const [promoCode, setPromoCode] = useState('')

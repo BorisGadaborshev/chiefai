@@ -18,7 +18,7 @@ const polzaModel = process.env.POLZA_MODEL || 'openai/gpt-4o-mini'
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN
 const telegramMaxAgeSeconds = Number(process.env.TELEGRAM_INIT_MAX_AGE_SECONDS || 86400)
 const telegramDevBypass = process.env.TELEGRAM_DEV_BYPASS === 'true'
-const requestCostStars = Number(process.env.REQUEST_COST_STARS || 2)
+const requestCostStars = Number(process.env.REQUEST_COST_STARS || 3)
 const newUserStartStars = Number(process.env.NEW_USER_START_STARS || 20)
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || ''
 const balancesPath = path.resolve(__dirname, '../data/balances.json')
