@@ -69,6 +69,7 @@ async function compressImage(file: File): Promise<string> {
 
 function App() {
   const [productsText, setProductsText] = useState('')
+  const [preferencesText, setPreferencesText] = useState('')
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -116,6 +117,7 @@ function App() {
         body: JSON.stringify({
           products: allProducts,
           imageBase64,
+          preferences: preferencesText.trim(),
         }),
       })
 
@@ -146,8 +148,7 @@ function App() {
     <Page>
       <Card>
         <Header>
-          <h1>Cookgram Mini App</h1>
-          <Badge>Telegram</Badge>
+          <h1>Chief Ai</h1>
         </Header>
 
         <Section>
@@ -171,12 +172,27 @@ function App() {
         </Section>
 
         <Section>
-          <SectionTitle>2) Или введи список продуктов</SectionTitle>
-          <Textarea
-            value={productsText}
-            onChange={(event) => setProductsText(event.target.value)}
-            placeholder="Например: яйца, сыр, помидоры"
-          />
+          <SectionTitle>2) Введи список продуктов</SectionTitle>
+          <Accordion>
+            <AccordionSummary>Открыть список продуктов</AccordionSummary>
+            <Textarea
+              value={productsText}
+              onChange={(event) => setProductsText(event.target.value)}
+              placeholder="Например: яйца, сыр, помидоры"
+            />
+          </Accordion>
+        </Section>
+
+        <Section>
+          <SectionTitle>3) Пожелания</SectionTitle>
+          <Accordion>
+            <AccordionSummary>Открыть пожелания и ограничения</AccordionSummary>
+            <Textarea
+              value={preferencesText}
+              onChange={(event) => setPreferencesText(event.target.value)}
+              placeholder="Пожелания: здоровое питание, исключить лук, без сахара"
+            />
+          </Accordion>
         </Section>
 
         <ActionRow>
@@ -186,11 +202,12 @@ function App() {
           <ProductsInfo>
             Продукты: {allProducts.length > 0 ? allProducts.join(', ') : 'не добавлены'}
           </ProductsInfo>
+          {preferencesText.trim() && <ProductsInfo>Пожелания: {preferencesText.trim()}</ProductsInfo>}
         </ActionRow>
         {error && <ErrorText>{error}</ErrorText>}
 
         <Section>
-          <SectionTitle>3) Подходящие рецепты</SectionTitle>
+          <SectionTitle>4) Подходящие рецепты</SectionTitle>
           {!loading && matchedRecipes.length === 0 && !error && (
             <EmptyState>
               Пока не нашел подходящих рецептов. Добавь больше продуктов или измени список.
@@ -242,13 +259,6 @@ const Header = styled.header`
     margin: 0;
     font-size: 22px;
   }
-`
-
-const Badge = styled.span`
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 12px;
-  background: rgba(255, 255, 255, 0.15);
 `
 
 const Section = styled.section`
@@ -315,6 +325,21 @@ const Textarea = styled.textarea`
   color: #eaf2ff;
   background: rgba(255, 255, 255, 0.06);
   outline: none;
+`
+
+const Accordion = styled.details`
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 10px;
+`
+
+const AccordionSummary = styled.summary`
+  cursor: pointer;
+  font-size: 14px;
+  color: #d8e8ff;
+  margin-bottom: 10px;
+  user-select: none;
 `
 
 const ActionRow = styled.div`
