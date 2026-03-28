@@ -43,6 +43,18 @@ type TelegramWindow = Window & {
   }
 }
 
+function getOrCreateClientId(): string {
+  const storageKey = 'chief-ai-client-id'
+  const existing = window.localStorage.getItem(storageKey)
+  if (existing) {
+    return existing
+  }
+
+  const generated = `web_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`
+  window.localStorage.setItem(storageKey, generated)
+  return generated
+}
+
 function normalize(value: string): string {
   return value.trim().toLowerCase()
 }
@@ -98,11 +110,7 @@ async function compressImage(file: File): Promise<string> {
 function App() {
   const telegramWebApp = (window as TelegramWindow).Telegram?.WebApp
   const telegramInitData = telegramWebApp?.initData ?? ''
-  const isTelegramLaunch = Boolean(telegramWebApp && telegramInitData)
-  const hostname = window.location.hostname
-  const isLocalDevelopment =
-    import.meta.env.DEV && ['localhost', '127.0.0.1', '::1'].includes(hostname)
-  const isAllowedLaunch = isTelegramLaunch || isLocalDevelopment
+  const [clientId] = useState(() => getOrCreateClientId())
 
   const [productsText, setProductsText] = useState('')
   const [preferencesText, setPreferencesText] = useState('')
@@ -126,15 +134,12 @@ function App() {
   }, [telegramWebApp])
 
   useEffect(() => {
-    if (!isAllowedLaunch) {
-      return
-    }
-
     const loadBalance = async () => {
       try {
         const response = await fetch('/api/balance', {
           headers: {
             'X-Telegram-Init-Data': telegramInitData,
+            'X-Client-Id': clientId,
           },
         })
         if (!response.ok) {
@@ -158,7 +163,7 @@ function App() {
     }
 
     void loadBalance()
-  }, [isAllowedLaunch, telegramInitData])
+  }, [telegramInitData, clientId])
 
   useEffect(() => {
     if (!imageFile) {
@@ -199,6 +204,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
           'X-Telegram-Init-Data': telegramInitData,
+          'X-Client-Id': clientId,
         },
         body: JSON.stringify({
           products: allProducts,
@@ -257,6 +263,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
           'X-Telegram-Init-Data': telegramInitData,
+          'X-Client-Id': clientId,
         },
         body: JSON.stringify({ packageId }),
       })
@@ -283,6 +290,7 @@ function App() {
       const balanceResponse = await fetch('/api/balance', {
         headers: {
           'X-Telegram-Init-Data': telegramInitData,
+          'X-Client-Id': clientId,
         },
       })
       if (balanceResponse.ok) {
@@ -323,6 +331,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
           'X-Telegram-Init-Data': telegramInitData,
+          'X-Client-Id': clientId,
         },
         body: JSON.stringify({ code }),
       })
@@ -352,25 +361,10 @@ function App() {
 
   return (
     <Page>
-      {!isAllowedLaunch && (
-        <Card>
-          <Header>
-            <h1>Chief Ai</h1>
-          </Header>
-          <Section>
-            <SectionTitle>Доступ ограничен</SectionTitle>
-            <EmptyState>
-              Это приложение работает только внутри Telegram Mini App. Открой его через Telegram.
-            </EmptyState>
-          </Section>
-        </Card>
-      )}
-
-      {isAllowedLaunch && (
-        <Card>
-          <Header>
-            <h1>Chief Ai</h1>
-          </Header>
+      <Card>
+        <Header>
+          <h1>Chief Ai</h1>
+        </Header>
 
           <Section>
             <SectionTitle>1) Добавь фото продуктов</SectionTitle>
@@ -477,8 +471,7 @@ function App() {
             ))}
             {note && <Hint>{note}</Hint>}
           </Section>
-        </Card>
-      )}
+      </Card>
     </Page>
   )
 }

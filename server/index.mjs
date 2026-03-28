@@ -16,10 +16,8 @@ const polzaApiUrl = process.env.POLZA_API_URL || 'https://polza.ai/api/v1/chat/c
 const polzaApiKey = process.env.POLZA_API_KEY
 const polzaModel = process.env.POLZA_MODEL || 'openai/gpt-4o-mini'
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN
-const telegramMaxAgeSeconds = Number(process.env.TELEGRAM_INIT_MAX_AGE_SECONDS || 86400)
-const telegramDevBypass = process.env.TELEGRAM_DEV_BYPASS === 'true'
 const requestCostStars = Number(process.env.REQUEST_COST_STARS || 3)
-const newUserStartStars = Number(process.env.NEW_USER_START_STARS || 20)
+const newUserStartStars = Number(process.env.NEW_USER_START_STARS || 0)
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || ''
 const balancesPath = path.resolve(__dirname, '../data/balances.json')
 const promoUsagePath = path.resolve(__dirname, '../data/promo-usage.json')
@@ -36,45 +34,6 @@ const topupPackages = [
 
 if (!polzaApiKey) {
   throw new Error('POLZA_API_KEY is missing. Set it in .env.local')
-}
-if (!telegramBotToken && !telegramDevBypass) {
-  throw new Error('TELEGRAM_BOT_TOKEN is missing. Set it in .env.local')
-}
-
-function isValidTelegramInitData(initData) {
-  if (!initData || !telegramBotToken) {
-    return false
-  }
-
-  const params = new URLSearchParams(initData)
-  const hash = params.get('hash')
-  const authDate = Number(params.get('auth_date') || 0)
-
-  if (!hash || !authDate) {
-    return false
-  }
-
-  const now = Math.floor(Date.now() / 1000)
-  if (Math.abs(now - authDate) > telegramMaxAgeSeconds) {
-    return false
-  }
-
-  params.delete('hash')
-  const dataCheckString = [...params.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${key}=${value}`)
-    .join('\n')
-
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(telegramBotToken).digest()
-  const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex')
-
-  const hashBuffer = Buffer.from(hash, 'hex')
-  const calculatedBuffer = Buffer.from(calculatedHash, 'hex')
-  if (hashBuffer.length !== calculatedBuffer.length) {
-    return false
-  }
-
-  return crypto.timingSafeEqual(hashBuffer, calculatedBuffer)
 }
 
 function callTelegramApi(method, payload) {
@@ -110,14 +69,20 @@ function extractTelegramUserId(initData) {
   }
 }
 
-function isLocalDevRequest(req) {
-  const host = String(req.hostname || '').toLowerCase()
+function resolveUserId(req) {
+  const initData = req.get('x-telegram-init-data') || ''
+  const telegramUserId = extractTelegramUserId(initData)
+  if (telegramUserId) {
+    return `tg:${telegramUserId}`
+  }
+
+  const clientId = String(req.get('x-client-id') || '').trim()
+  if (/^[a-zA-Z0-9_-]{8,80}$/.test(clientId)) {
+    return `web:${clientId}`
+  }
+
   const ip = String(req.ip || '').replace('::ffff:', '')
-
-  const localHosts = new Set(['localhost', '127.0.0.1', '::1'])
-  const localIps = new Set(['127.0.0.1', '::1'])
-
-  return localHosts.has(host) || localIps.has(ip)
+  return `ip:${ip || 'unknown'}`
 }
 
 function ensureBalancesStorage() {
@@ -373,26 +338,7 @@ app.post('/telegram/webhook', async (req, res) => {
 })
 
 app.use('/api', (req, res, next) => {
-  if (telegramDevBypass && isLocalDevRequest(req)) {
-    req.userId = 'local-dev'
-    return next()
-  }
-
-  const initData = req.get('x-telegram-init-data') || ''
-  if (!isValidTelegramInitData(initData)) {
-    return res.status(403).json({
-      error: 'Доступ разрешен только из Telegram Mini App.',
-    })
-  }
-
-  const userId = extractTelegramUserId(initData)
-  if (!userId) {
-    return res.status(403).json({
-      error: 'Не удалось определить пользователя Telegram.',
-    })
-  }
-
-  req.userId = userId
+  req.userId = resolveUserId(req)
   next()
 })
 
