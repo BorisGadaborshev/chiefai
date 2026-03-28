@@ -1,5 +1,6 @@
 import express from 'express'
 import cors from 'cors'
+import crypto from 'node:crypto'
 import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -14,9 +15,61 @@ const distExists = fs.existsSync(distPath)
 const polzaApiUrl = process.env.POLZA_API_URL || 'https://polza.ai/api/v1/chat/completions'
 const polzaApiKey = process.env.POLZA_API_KEY
 const polzaModel = process.env.POLZA_MODEL || 'openai/gpt-4o-mini'
+const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN
+const telegramMaxAgeSeconds = Number(process.env.TELEGRAM_INIT_MAX_AGE_SECONDS || 86400)
+const telegramDevBypass = process.env.TELEGRAM_DEV_BYPASS === 'true'
 
 if (!polzaApiKey) {
   throw new Error('POLZA_API_KEY is missing. Set it in .env.local')
+}
+if (!telegramBotToken && !telegramDevBypass) {
+  throw new Error('TELEGRAM_BOT_TOKEN is missing. Set it in .env.local')
+}
+
+function isValidTelegramInitData(initData) {
+  if (!initData || !telegramBotToken) {
+    return false
+  }
+
+  const params = new URLSearchParams(initData)
+  const hash = params.get('hash')
+  const authDate = Number(params.get('auth_date') || 0)
+
+  if (!hash || !authDate) {
+    return false
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+  if (Math.abs(now - authDate) > telegramMaxAgeSeconds) {
+    return false
+  }
+
+  params.delete('hash')
+  const dataCheckString = [...params.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n')
+
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(telegramBotToken).digest()
+  const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex')
+
+  const hashBuffer = Buffer.from(hash, 'hex')
+  const calculatedBuffer = Buffer.from(calculatedHash, 'hex')
+  if (hashBuffer.length !== calculatedBuffer.length) {
+    return false
+  }
+
+  return crypto.timingSafeEqual(hashBuffer, calculatedBuffer)
+}
+
+function isLocalDevRequest(req) {
+  const host = String(req.hostname || '').toLowerCase()
+  const ip = String(req.ip || '').replace('::ffff:', '')
+
+  const localHosts = new Set(['localhost', '127.0.0.1', '::1'])
+  const localIps = new Set(['127.0.0.1', '::1'])
+
+  return localHosts.has(host) || localIps.has(ip)
 }
 
 app.use(cors())
@@ -25,6 +78,21 @@ app.use(express.json({ limit: '25mb' }))
 if (distExists) {
   app.use(express.static(distPath))
 }
+
+app.use('/api', (req, res, next) => {
+  if (telegramDevBypass && isLocalDevRequest(req)) {
+    return next()
+  }
+
+  const initData = req.get('x-telegram-init-data') || ''
+  if (!isValidTelegramInitData(initData)) {
+    return res.status(403).json({
+      error: 'Доступ разрешен только из Telegram Mini App.',
+    })
+  }
+
+  next()
+})
 
 app.post('/api/recipes', async (req, res) => {
   const { products = [], imageBase64, preferences } = req.body ?? {}

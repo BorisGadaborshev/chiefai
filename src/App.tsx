@@ -15,6 +15,18 @@ type RecipesResponse = {
   rawText?: string
 }
 
+type TelegramWebApp = {
+  initData: string
+  ready?: () => void
+  expand?: () => void
+}
+
+type TelegramWindow = Window & {
+  Telegram?: {
+    WebApp?: TelegramWebApp
+  }
+}
+
 function normalize(value: string): string {
   return value.trim().toLowerCase()
 }
@@ -68,6 +80,14 @@ async function compressImage(file: File): Promise<string> {
 }
 
 function App() {
+  const telegramWebApp = (window as TelegramWindow).Telegram?.WebApp
+  const telegramInitData = telegramWebApp?.initData ?? ''
+  const isTelegramLaunch = Boolean(telegramWebApp && telegramInitData)
+  const hostname = window.location.hostname
+  const isLocalDevelopment =
+    import.meta.env.DEV && ['localhost', '127.0.0.1', '::1'].includes(hostname)
+  const isAllowedLaunch = isTelegramLaunch || isLocalDevelopment
+
   const [productsText, setProductsText] = useState('')
   const [preferencesText, setPreferencesText] = useState('')
   const [imageFile, setImageFile] = useState<File | null>(null)
@@ -76,6 +96,11 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [matchedRecipes, setMatchedRecipes] = useState<Recipe[]>([])
+
+  useEffect(() => {
+    telegramWebApp?.ready?.()
+    telegramWebApp?.expand?.()
+  }, [telegramWebApp])
 
   useEffect(() => {
     if (!imageFile) {
@@ -113,7 +138,10 @@ function App() {
 
       const response = await fetch('/api/recipes', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': telegramInitData,
+        },
         body: JSON.stringify({
           products: allProducts,
           imageBase64,
@@ -146,10 +174,25 @@ function App() {
 
   return (
     <Page>
-      <Card>
-        <Header>
-          <h1>Chief Ai</h1>
-        </Header>
+      {!isAllowedLaunch && (
+        <Card>
+          <Header>
+            <h1>Chief Ai</h1>
+          </Header>
+          <Section>
+            <SectionTitle>Доступ ограничен</SectionTitle>
+            <EmptyState>
+              Это приложение работает только внутри Telegram Mini App. Открой его через Telegram.
+            </EmptyState>
+          </Section>
+        </Card>
+      )}
+
+      {isAllowedLaunch && (
+        <Card>
+          <Header>
+            <h1>Chief Ai</h1>
+          </Header>
 
         <Section>
           <SectionTitle>1) Добавь фото продуктов</SectionTitle>
@@ -226,7 +269,8 @@ function App() {
           ))}
           {note && <Hint>{note}</Hint>}
         </Section>
-      </Card>
+        </Card>
+      )}
     </Page>
   )
 }
