@@ -1,0 +1,160 @@
+import express from 'express'
+import cors from 'cors'
+
+const app = express()
+const port = Number(process.env.PORT || 8787)
+
+const polzaApiUrl = process.env.POLZA_API_URL || 'https://polza.ai/api/v1/chat/completions'
+const polzaApiKey = process.env.POLZA_API_KEY
+const polzaModel = process.env.POLZA_MODEL || 'openai/gpt-4o-mini'
+
+if (!polzaApiKey) {
+  throw new Error('POLZA_API_KEY is missing. Set it in .env.local')
+}
+
+app.use(cors())
+app.use(express.json({ limit: '25mb' }))
+
+app.post('/api/recipes', async (req, res) => {
+  const { products = [], imageBase64 } = req.body ?? {}
+  const cleanProducts = Array.isArray(products)
+    ? products
+        .map((item) => String(item).trim().toLowerCase())
+        .filter(Boolean)
+        .slice(0, 50)
+    : []
+
+  if (cleanProducts.length === 0 && !imageBase64) {
+    return res.status(400).json({ error: 'Передайте products или imageBase64.' })
+  }
+
+  const userParts = []
+  userParts.push({
+    type: 'text',
+    text: [
+      'Сформируй до 5 рецептов из доступных продуктов.',
+      'Отвечай строго JSON без markdown.',
+      'Формат: {"recipes":[{"id":"...","title":"...","ingredients":["..."],"steps":["..."]}],"note":"..."}',
+      `Список продуктов пользователя: ${cleanProducts.join(', ') || 'не указан'}.`,
+    ].join('\n'),
+  })
+
+  const hasImage = typeof imageBase64 === 'string' && imageBase64.startsWith('data:image')
+
+  if (hasImage) {
+    userParts.push({
+      type: 'image_url',
+      image_url: { url: imageBase64 },
+    })
+  }
+
+  try {
+    let fallbackToTextOnly = false
+    let polzaResponse = await fetch(polzaApiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${polzaApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: polzaModel,
+        temperature: 0.4,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Ты кулинарный ассистент. Рекомендуй простые и безопасные рецепты. Не выдумывай наличие продуктов.',
+          },
+          {
+            role: 'user',
+            content: userParts,
+          },
+        ],
+      }),
+    })
+
+    if (!polzaResponse.ok && hasImage) {
+      fallbackToTextOnly = true
+      polzaResponse = await fetch(polzaApiUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${polzaApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: polzaModel,
+          temperature: 0.4,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Ты кулинарный ассистент. Рекомендуй простые и безопасные рецепты. Не выдумывай наличие продуктов.',
+            },
+            {
+              role: 'user',
+              content: `Сформируй до 5 рецептов из доступных продуктов. Отвечай строго JSON без markdown. Формат: {"recipes":[{"id":"...","title":"...","ingredients":["..."],"steps":["..."]}],"note":"..."}. Список продуктов пользователя: ${
+                cleanProducts.join(', ') || 'не указан'
+              }.`,
+            },
+          ],
+        }),
+      })
+    }
+
+    if (!polzaResponse.ok) {
+      const errorText = await polzaResponse.text()
+      return res.status(502).json({
+        error: 'Ошибка ответа polza.ai',
+        details: errorText.slice(0, 1000),
+      })
+    }
+
+    const completion = await polzaResponse.json()
+    const content = completion?.choices?.[0]?.message?.content
+
+    if (typeof content !== 'string') {
+      return res.status(500).json({ error: 'Некорректный формат ответа от polza.ai' })
+    }
+
+    try {
+      const parsed = JSON.parse(content)
+      return res.json({
+        recipes: Array.isArray(parsed?.recipes) ? parsed.recipes : [],
+        note:
+          typeof parsed?.note === 'string'
+            ? parsed.note
+            : fallbackToTextOnly
+              ? 'Рецепты подобраны по списку продуктов (анализ фото временно недоступен).'
+              : undefined,
+      })
+    } catch {
+      return res.json({
+        recipes: [],
+        rawText: content,
+      })
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Неизвестная ошибка сервера'
+    return res.status(500).json({ error: message })
+  }
+})
+
+app.use((error, _req, res, next) => {
+  if (error?.type === 'entity.too.large') {
+    return res.status(413).json({
+      error: 'Фото слишком большое. Попробуйте изображение меньшего размера.',
+    })
+  }
+
+  if (error) {
+    return res.status(500).json({
+      error: error.message || 'Внутренняя ошибка сервера',
+    })
+  }
+
+  next()
+})
+
+app.listen(port, () => {
+  console.log(`API server started on http://localhost:${port}`)
+})
