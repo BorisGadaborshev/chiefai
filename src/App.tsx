@@ -35,6 +35,8 @@ type TelegramWebApp = {
   ready?: () => void
   expand?: () => void
   openInvoice?: (url: string, callback?: (status: string) => void) => void
+  openTelegramLink?: (url: string) => void
+  openLink?: (url: string) => void
 }
 
 type TelegramWindow = Window & {
@@ -249,11 +251,6 @@ function App() {
   }
 
   const onTopup = async (packageId: string) => {
-    if (!telegramWebApp?.openInvoice) {
-      setError('Пополнение доступно только внутри Telegram Mini App.')
-      return
-    }
-
     setTopupLoadingId(packageId)
     setError(null)
 
@@ -273,19 +270,32 @@ function App() {
         throw new Error(payload.error || 'Не удалось создать инвойс')
       }
 
-      await new Promise<void>((resolve, reject) => {
-        telegramWebApp.openInvoice?.(payload.invoiceLink!, (status) => {
-          if (status === 'paid') {
-            resolve()
-            return
-          }
-          if (status === 'cancelled') {
-            reject(new Error('Платеж отменен.'))
-            return
-          }
-          reject(new Error(`Не удалось завершить платеж (${status}).`))
+      if (telegramWebApp?.openInvoice) {
+        await new Promise<void>((resolve, reject) => {
+          telegramWebApp.openInvoice?.(payload.invoiceLink!, (status) => {
+            if (status === 'paid') {
+              resolve()
+              return
+            }
+            if (status === 'cancelled') {
+              reject(new Error('Платеж отменен.'))
+              return
+            }
+            reject(new Error(`Не удалось завершить платеж (${status}).`))
+          })
         })
-      })
+      } else {
+        // Fallback for Telegram clients without WebApp.openInvoice support.
+        if (telegramWebApp?.openTelegramLink) {
+          telegramWebApp.openTelegramLink(payload.invoiceLink)
+        } else if (telegramWebApp?.openLink) {
+          telegramWebApp.openLink(payload.invoiceLink)
+        } else {
+          window.location.href = payload.invoiceLink
+        }
+        setPromoMessage('Инвойс открыт. После оплаты нажми кнопку пополнения еще раз для обновления баланса.')
+        return
+      }
 
       const balanceResponse = await fetch('/api/balance', {
         headers: {
