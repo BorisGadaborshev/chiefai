@@ -20,17 +20,17 @@ const requestCostStars = Number(process.env.REQUEST_COST_STARS || 3)
 const newUserStartStars = Number(process.env.NEW_USER_START_STARS || 0)
 const telegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET || ''
 const balancesPath = path.resolve(__dirname, '../data/balances.json')
-const promoUsagePath = path.resolve(__dirname, '../data/promo-usage.json')
 const invoicesSecret = process.env.INVOICES_SECRET || polzaApiKey
 const fixedPromoCode = 'BEASTOLOLO'
 const promoGrantStars = Number(process.env.PROMO_GRANT_STARS || requestCostStars)
-const promoMaxUses = Number(process.env.PROMO_MAX_USES || 10)
 
 const topupPackages = [
   { id: 'topup_25', stars: 25, priceXtr: 25, label: '25⭐' },
   { id: 'topup_100', stars: 100, priceXtr: 100, label: '100⭐' },
   { id: 'topup_250', stars: 250, priceXtr: 250, label: '250⭐' },
 ]
+
+const pantryIngredients = new Set(['соль', 'перец', 'вода', 'масло', 'растительное масло'])
 
 if (!polzaApiKey) {
   throw new Error('POLZA_API_KEY is missing. Set it in .env.local')
@@ -95,31 +95,6 @@ function ensureBalancesStorage() {
   }
 }
 
-function ensurePromoUsageStorage() {
-  const dir = path.dirname(promoUsagePath)
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
-  }
-  if (!fs.existsSync(promoUsagePath)) {
-    fs.writeFileSync(promoUsagePath, '{}', 'utf8')
-  }
-}
-
-function loadPromoUsage() {
-  ensurePromoUsageStorage()
-  try {
-    const raw = fs.readFileSync(promoUsagePath, 'utf8')
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function savePromoUsage(usage) {
-  fs.writeFileSync(promoUsagePath, JSON.stringify(usage, null, 2), 'utf8')
-}
-
 function loadBalances() {
   ensureBalancesStorage()
 
@@ -142,13 +117,8 @@ function getOrCreateWallet(balances, userId) {
       stars: newUserStartStars,
       spent: 0,
       requests: 0,
-      redeemedPromos: [],
       updatedAt: new Date().toISOString(),
     }
-  }
-
-  if (!Array.isArray(balances[userId].redeemedPromos)) {
-    balances[userId].redeemedPromos = []
   }
 
   return balances[userId]
@@ -162,7 +132,6 @@ function getBalance(userId) {
   return {
     stars: Number(wallet.stars || 0),
     requestCostStars,
-    promoRedeemed: wallet.redeemedPromos.includes(fixedPromoCode),
   }
 }
 
@@ -224,31 +193,9 @@ function redeemPromo(userId, promoCodeRaw) {
 
   const balances = loadBalances()
   const wallet = getOrCreateWallet(balances, userId)
-  const promoUsage = loadPromoUsage()
-  const currentUsage = Number(promoUsage[fixedPromoCode] || 0)
-
-  if (currentUsage >= promoMaxUses) {
-    return {
-      ok: false,
-      reason: 'limit_reached',
-      balance: Number(wallet.stars || 0),
-    }
-  }
-
-  if (wallet.redeemedPromos.includes(fixedPromoCode)) {
-    return {
-      ok: false,
-      reason: 'already_used',
-      balance: Number(wallet.stars || 0),
-    }
-  }
-
-  wallet.redeemedPromos.push(fixedPromoCode)
   wallet.stars = Number(wallet.stars || 0) + promoGrantStars
   wallet.updatedAt = new Date().toISOString()
   saveBalances(balances)
-  promoUsage[fixedPromoCode] = currentUsage + 1
-  savePromoUsage(promoUsage)
 
   return {
     ok: true,
@@ -289,6 +236,125 @@ function parseAndVerifyInvoicePayload(payload) {
   }
 
   return { userId, packageId, stars }
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[().,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function computeScore(usedCount, userProductsCount, missingCount, timeMinutes) {
+  const safeUserCount = Math.max(1, userProductsCount)
+  const coverage = usedCount / safeUserCount
+  const missingPenalty = missingCount * 0.12
+  const timePenalty = Math.max(0, (timeMinutes - 30) * 0.01)
+  return Math.max(0, Math.round((coverage - missingPenalty - timePenalty) * 100))
+}
+
+function normalizeRecipe(recipe, userProductsSet, userProductsCount, index) {
+  const title = String(recipe?.title || '').trim() || `Рецепт ${index + 1}`
+  const ingredients = Array.isArray(recipe?.ingredients)
+    ? recipe.ingredients.map((item) => String(item).trim()).filter(Boolean)
+    : []
+  const rawMissing = Array.isArray(recipe?.missing_ingredients)
+    ? recipe.missing_ingredients
+    : ingredients.filter((item) => !userProductsSet.has(normalizeText(item)))
+  const missingIngredients = rawMissing
+    .map((item) => String(item).trim())
+    .filter((item) => item && !pantryIngredients.has(normalizeText(item)))
+  const usedProducts = Array.isArray(recipe?.used_products)
+    ? recipe.used_products.map((item) => String(item).trim()).filter(Boolean)
+    : [...userProductsSet].filter((product) =>
+        ingredients.some((ingredient) => normalizeText(ingredient).includes(product)),
+      )
+  const steps = Array.isArray(recipe?.steps)
+    ? recipe.steps.map((step) => String(step).trim()).filter(Boolean).slice(0, 8)
+    : []
+  const timeMinutes = Number(recipe?.time_minutes) > 0 ? Number(recipe.time_minutes) : 25
+  const difficulty =
+    recipe?.difficulty === 'medium' || recipe?.difficulty === 'easy' ? recipe.difficulty : 'easy'
+  const score = computeScore(usedProducts.length, userProductsCount, missingIngredients.length, timeMinutes)
+
+  return {
+    id: String(recipe?.id || `recipe_${index + 1}`),
+    title,
+    ingredients,
+    used_products: usedProducts,
+    missing_ingredients: missingIngredients,
+    steps: steps.length > 0 ? steps : ['Подготовьте ингредиенты', 'Смешайте и приготовьте до готовности'],
+    time_minutes: timeMinutes,
+    difficulty,
+    score,
+  }
+}
+
+function rankAndLimitRecipes(rawRecipes, cleanProducts, limit = 10) {
+  const userProductsSet = new Set(cleanProducts.map(normalizeText).filter(Boolean))
+  const userProductsCount = userProductsSet.size
+
+  const normalized = (Array.isArray(rawRecipes) ? rawRecipes : []).map((recipe, index) =>
+    normalizeRecipe(recipe, userProductsSet, userProductsCount, index),
+  )
+
+  const dedupedMap = new Map()
+  for (const recipe of normalized) {
+    const dedupeKey = `${normalizeText(recipe.title)}|${recipe.ingredients
+      .map((item) => normalizeText(item))
+      .sort()
+      .join('|')}`
+    const existing = dedupedMap.get(dedupeKey)
+    if (!existing || recipe.score > existing.score) {
+      dedupedMap.set(dedupeKey, recipe)
+    }
+  }
+
+  return [...dedupedMap.values()].sort((a, b) => b.score - a.score).slice(0, limit)
+}
+
+function tryParseRecipesPayload(content) {
+  const text = String(content || '').trim()
+  if (!text) {
+    return null
+  }
+
+  const candidates = []
+  const withoutCodeFence = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```/i, '')
+    .replace(/```$/i, '')
+    .trim()
+  candidates.push(withoutCodeFence)
+
+  // Heuristic repair for common model mistake:
+  // {"recipes":[{...},"note":"..."} -> {"recipes":[{...}],"note":"..."}
+  if (
+    withoutCodeFence.includes('"recipes":[') &&
+    withoutCodeFence.includes('"note"') &&
+    !withoutCodeFence.includes('],"note"')
+  ) {
+    candidates.push(withoutCodeFence.replace(/},\s*"note"\s*:/, '}], "note":'))
+  }
+
+  const objectMatch = withoutCodeFence.match(/\{[\s\S]*\}/)
+  if (objectMatch && objectMatch[0] !== withoutCodeFence) {
+    candidates.push(objectMatch[0])
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate)
+      if (parsed && typeof parsed === 'object') {
+        return parsed
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+
+  return null
 }
 
 app.use(cors())
@@ -357,19 +423,6 @@ app.post('/api/promo/redeem', (req, res) => {
   const result = redeemPromo(userId, code)
 
   if (!result.ok) {
-    if (result.reason === 'already_used') {
-      return res.status(409).json({
-        error: 'Этот промокод уже использован.',
-        balance: result.balance,
-      })
-    }
-    if (result.reason === 'limit_reached') {
-      return res.status(409).json({
-        error: 'Промокод больше недоступен.',
-        balance: result.balance,
-      })
-    }
-
     return res.status(400).json({
       error: 'Неверный промокод.',
     })
@@ -452,9 +505,12 @@ app.post('/api/recipes', async (req, res) => {
   userParts.push({
     type: 'text',
     text: [
-      'Сформируй до 5 рецептов из доступных продуктов.',
+      'Сформируй РОВНО 10 лучших рецептов из доступных продуктов.',
+      'Критерии "лучший": максимум использования продуктов пользователя, минимум недостающих ингредиентов, простота приготовления дома, разнообразие блюд.',
+      'Не выдумывай наличие продуктов пользователя.',
+      'Базовые ингредиенты (не считать как missing): соль, перец, вода, растительное масло.',
       'Отвечай строго JSON без markdown.',
-      'Формат: {"recipes":[{"id":"...","title":"...","ingredients":["..."],"steps":["..."]}],"note":"..."}',
+      'Формат: {"recipes":[{"id":"...","title":"...","ingredients":["..."],"used_products":["..."],"missing_ingredients":["..."],"steps":["..."],"time_minutes":25,"difficulty":"easy","score":0}],"note":"..."}',
       `Список продуктов пользователя: ${cleanProducts.join(', ') || 'не указан'}.`,
       `Пожелания и ограничения пользователя: ${cleanPreferences || 'не указаны'}.`,
     ].join('\n'),
@@ -484,7 +540,7 @@ app.post('/api/recipes', async (req, res) => {
           {
             role: 'system',
             content:
-              'Ты кулинарный ассистент. Рекомендуй простые и безопасные рецепты. Не выдумывай наличие продуктов.',
+              'Ты кулинарный ассистент. Качество важнее креативности. Возвращай только JSON по формату пользователя.',
           },
           {
             role: 'user',
@@ -509,11 +565,11 @@ app.post('/api/recipes', async (req, res) => {
             {
               role: 'system',
               content:
-                'Ты кулинарный ассистент. Рекомендуй простые и безопасные рецепты. Не выдумывай наличие продуктов.',
+                'Ты кулинарный ассистент. Качество важнее креативности. Возвращай только JSON по формату пользователя.',
             },
             {
               role: 'user',
-              content: `Сформируй до 5 рецептов из доступных продуктов. Отвечай строго JSON без markdown. Формат: {"recipes":[{"id":"...","title":"...","ingredients":["..."],"steps":["..."]}],"note":"..."}. Список продуктов пользователя: ${
+              content: `Сформируй РОВНО 10 лучших рецептов из доступных продуктов. Отвечай строго JSON без markdown. Формат: {"recipes":[{"id":"...","title":"...","ingredients":["..."],"used_products":["..."],"missing_ingredients":["..."],"steps":["..."],"time_minutes":25,"difficulty":"easy","score":0}],"note":"..."}. Базовые ингредиенты (не считать missing): соль, перец, вода, растительное масло. Список продуктов пользователя: ${
                 cleanProducts.join(', ') || 'не указан'
               }.`,
             },
@@ -541,9 +597,10 @@ app.post('/api/recipes', async (req, res) => {
 
     try {
       const parsed = JSON.parse(content)
+      const rankedRecipes = rankAndLimitRecipes(parsed?.recipes, cleanProducts, 10)
       refundRequired = false
       return res.json({
-        recipes: Array.isArray(parsed?.recipes) ? parsed.recipes : [],
+        recipes: rankedRecipes,
         note:
           typeof parsed?.note === 'string'
             ? parsed.note
@@ -554,6 +611,23 @@ app.post('/api/recipes', async (req, res) => {
         requestCostStars,
       })
     } catch {
+      const recovered = tryParseRecipesPayload(content)
+      if (recovered) {
+        const rankedRecipes = rankAndLimitRecipes(recovered?.recipes, cleanProducts, 10)
+        refundRequired = false
+        return res.json({
+          recipes: rankedRecipes,
+          note:
+            typeof recovered?.note === 'string'
+              ? recovered.note
+              : fallbackToTextOnly
+                ? 'Рецепты подобраны по списку продуктов (анализ фото временно недоступен).'
+                : undefined,
+          balance: charge.balance,
+          requestCostStars,
+        })
+      }
+
       refundRequired = false
       return res.json({
         recipes: [],

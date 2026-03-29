@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import styled from '@emotion/styled'
 
@@ -44,6 +44,58 @@ type TelegramWindow = Window & {
     WebApp?: TelegramWebApp
   }
 }
+
+type AgreementSection = {
+  title: string
+  items: string[]
+}
+
+const AGREEMENT_VERSION = 'v1'
+const AGREEMENT_STORAGE_KEY = `chief-ai-agreement-${AGREEMENT_VERSION}`
+
+const agreementSections: AgreementSection[] = [
+  {
+    title: '1. Назначение сервиса',
+    items: [
+      'Chief Ai подбирает варианты рецептов на основе фото, списка продуктов и пожеланий пользователя.',
+      'Результат носит рекомендательный характер и не является профессиональной медицинской или диетологической консультацией.',
+    ],
+  },
+  {
+    title: '2. Доступ и оплата',
+    items: [
+      'Генерация рецептов выполняется за внутренние звезды приложения в соответствии с текущим тарифом.',
+      'Пополнение и промокоды применяются по правилам, действующим на момент использования.',
+    ],
+  },
+  {
+    title: '3. Контент пользователя',
+    items: [
+      'Пользователь подтверждает право загружать фото и вводить данные, которые не нарушают права третьих лиц.',
+      'Запрещено использовать сервис для противоправного, оскорбительного или опасного контента.',
+    ],
+  },
+  {
+    title: '4. Обработка данных',
+    items: [
+      'Для работы сервиса могут обрабатываться фото продуктов, текстовые запросы и технические данные сессии.',
+      'Отправляя данные, пользователь соглашается на их обработку для генерации ответа.',
+    ],
+  },
+  {
+    title: '5. Ограничение ответственности',
+    items: [
+      'Пользователь самостоятельно проверяет ингредиенты, аллергенность, сроки годности и безопасность приготовления.',
+      'Сервис не несет ответственности за решения, принятые пользователем на основе рекомендаций.',
+    ],
+  },
+  {
+    title: '6. Изменение условий',
+    items: [
+      'Условия могут обновляться; продолжение использования сервиса означает согласие с актуальной редакцией.',
+    ],
+  },
+]
 
 function getOrCreateClientId(): string {
   const storageKey = 'chief-ai-client-id'
@@ -113,6 +165,10 @@ function App() {
   const telegramWebApp = (window as TelegramWindow).Telegram?.WebApp
   const telegramInitData = telegramWebApp?.initData ?? ''
   const [clientId] = useState(() => getOrCreateClientId())
+  const [hasAcceptedAgreement, setHasAcceptedAgreement] = useState(
+    () => window.localStorage.getItem(AGREEMENT_STORAGE_KEY) === 'accepted',
+  )
+  const [agreementChecked, setAgreementChecked] = useState(false)
 
   const [productsText, setProductsText] = useState('')
   const [preferencesText, setPreferencesText] = useState('')
@@ -129,6 +185,11 @@ function App() {
   const [promoCode, setPromoCode] = useState('')
   const [promoLoading, setPromoLoading] = useState(false)
   const [promoMessage, setPromoMessage] = useState<string | null>(null)
+  const [cameraOpen, setCameraOpen] = useState(false)
+  const [cameraLoading, setCameraLoading] = useState(false)
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     telegramWebApp?.ready?.()
@@ -178,6 +239,18 @@ function App() {
     return () => URL.revokeObjectURL(objectUrl)
   }, [imageFile])
 
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.srcObject = cameraStream
+    }
+  }, [cameraStream])
+
+  useEffect(() => {
+    return () => {
+      cameraStream?.getTracks().forEach((track) => track.stop())
+    }
+  }, [cameraStream])
+
   const allProducts = useMemo(() => {
     const fromText = getProductsFromText(productsText)
     return [...new Set(fromText)]
@@ -187,6 +260,69 @@ function App() {
     const file = event.target.files?.[0] ?? null
     setImageFile(file)
   }
+
+  const stopCamera = () => {
+    cameraStream?.getTracks().forEach((track) => track.stop())
+    setCameraStream(null)
+    setCameraOpen(false)
+    setCameraLoading(false)
+  }
+
+  const onOpenCamera = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Камера не поддерживается на этом устройстве.')
+      return
+    }
+
+    setCameraLoading(true)
+    setError(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      })
+      setCameraStream(stream)
+      setCameraOpen(true)
+    } catch {
+      setError('Не удалось открыть камеру. Проверь разрешения браузера.')
+    } finally {
+      setCameraLoading(false)
+    }
+  }
+
+  const onCaptureFromCamera = async () => {
+    const video = videoRef.current
+    if (!video) return
+
+    const width = video.videoWidth || 1280
+    const height = video.videoHeight || 720
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    if (!context) {
+      setError('Не удалось получить кадр с камеры.')
+      return
+    }
+
+    context.drawImage(video, 0, 0, width, height)
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', 0.9),
+    )
+
+    if (!blob) {
+      setError('Не удалось создать фото с камеры.')
+      return
+    }
+
+    const file = new File([blob], `camera-${Date.now()}.jpg`, {
+      type: 'image/jpeg',
+    })
+    setImageFile(file)
+    stopCamera()
+  }
+
+  const onPickFromGallery = () => fileInputRef.current?.click()
 
   const onFindRecipes = async () => {
     if (!imageFile && allProducts.length === 0) {
@@ -369,6 +505,61 @@ function App() {
     }
   }
 
+  const onAcceptAgreement = () => {
+    if (!agreementChecked) {
+      return
+    }
+    window.localStorage.setItem(AGREEMENT_STORAGE_KEY, 'accepted')
+    setHasAcceptedAgreement(true)
+  }
+
+  if (!hasAcceptedAgreement) {
+    return (
+      <Page>
+        <Card>
+          <Header>
+            <h1>Chief Ai</h1>
+          </Header>
+
+          <Section>
+            <SectionTitle>Пользовательское соглашение</SectionTitle>
+            <AgreementText>
+              Перед использованием сервиса ознакомьтесь с условиями и подтвердите согласие.
+            </AgreementText>
+            <AgreementList>
+              {agreementSections.map((section) => (
+                <AgreementItem key={section.title}>
+                  <AgreementTitle>{section.title}</AgreementTitle>
+                  {section.items.map((item) => (
+                    <AgreementText key={item}>- {item}</AgreementText>
+                  ))}
+                </AgreementItem>
+              ))}
+            </AgreementList>
+          </Section>
+
+          <AgreementActions>
+            <AgreementCheckboxLabel>
+              <input
+                type="checkbox"
+                checked={agreementChecked}
+                onChange={(event) => setAgreementChecked(event.target.checked)}
+              />
+              Я согласен с условиями пользовательского соглашения
+            </AgreementCheckboxLabel>
+            <PrimaryButton
+              type="button"
+              disabled={!agreementChecked}
+              onClick={onAcceptAgreement}
+            >
+              Продолжить
+            </PrimaryButton>
+          </AgreementActions>
+        </Card>
+      </Page>
+    )
+  }
+
   return (
     <Page>
       <Card>
@@ -385,10 +576,33 @@ function App() {
                 <PreviewPlaceholder>Изображение пока не выбрано</PreviewPlaceholder>
               )}
             </PreviewArea>
-            <UploadLabel>
-              <input type="file" accept="image/*" onChange={onPhotoChange} />
-              Выбрать фото
-            </UploadLabel>
+            <UploadActions>
+              <HiddenFileInput
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={onPhotoChange}
+              />
+              <UploadButton type="button" onClick={onPickFromGallery}>
+                Выбрать фото
+              </UploadButton>
+              <UploadButton type="button" onClick={onOpenCamera} disabled={cameraLoading}>
+                {cameraLoading ? 'Открываем камеру...' : 'Сделать снимок'}
+              </UploadButton>
+            </UploadActions>
+            {cameraOpen && (
+              <CameraPanel>
+                <CameraVideo ref={videoRef} autoPlay playsInline muted />
+                <CameraControls>
+                  <CameraButton type="button" onClick={onCaptureFromCamera}>
+                    Снять
+                  </CameraButton>
+                  <CancelButton type="button" onClick={stopCamera}>
+                    Отмена
+                  </CancelButton>
+                </CameraControls>
+              </CameraPanel>
+            )}
             {imageFile && (
               <Hint>
                 Фото загружено: <strong>{imageFile.name}</strong>
@@ -420,6 +634,17 @@ function App() {
             </Accordion>
           </Section>
 
+          <PromoRow>
+            <PromoInput
+              value={promoCode}
+              onChange={(event) => setPromoCode(event.target.value)}
+              placeholder="Введите промокод"
+            />
+            <TopupButton type="button" disabled={promoLoading} onClick={onRedeemPromo}>
+              {promoLoading ? 'Проверяем...' : 'Активировать промокод'}
+            </TopupButton>
+          </PromoRow>
+          {promoMessage && <Hint>{promoMessage}</Hint>}
           <ActionRow>
             <PrimaryButton type="button" onClick={onFindRecipes} disabled={loading}>
               {loading ? 'Ищем...' : `Подобрать рецепты (${requestCostStars}⭐)`}
@@ -448,17 +673,6 @@ function App() {
               </TopupButton>
             ))}
           </TopupRow>
-          <PromoRow>
-            <PromoInput
-              value={promoCode}
-              onChange={(event) => setPromoCode(event.target.value)}
-              placeholder="Введите промокод"
-            />
-            <TopupButton type="button" disabled={promoLoading} onClick={onRedeemPromo}>
-              {promoLoading ? 'Проверяем...' : 'Активировать промокод'}
-            </TopupButton>
-          </PromoRow>
-          {promoMessage && <Hint>{promoMessage}</Hint>}
           {error && <ErrorText>{error}</ErrorText>}
 
           <Section>
@@ -525,18 +739,94 @@ const SectionTitle = styled.h2`
   font-size: 16px;
 `
 
-const UploadLabel = styled.label`
-  display: inline-block;
+const AgreementList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+`
+
+const AgreementItem = styled.div`
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+`
+
+const AgreementTitle = styled.h3`
+  margin: 0 0 8px;
+  font-size: 14px;
+`
+
+const AgreementText = styled.p`
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #c9dbff;
+`
+
+const AgreementActions = styled.div`
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+`
+
+const AgreementCheckboxLabel = styled.label`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #d4e3ff;
+`
+
+const HiddenFileInput = styled.input`
+  display: none;
+`
+
+const UploadActions = styled.div`
   margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+`
+
+const UploadButton = styled.button`
+  border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 12px;
   padding: 10px 14px;
-  font-size: 14px;
+  color: #eaf2ff;
   cursor: pointer;
   background: #1f71df;
+`
 
-  input {
-    display: none;
-  }
+const CameraButton = styled.button`
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: #eaf2ff;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.08);
+`
+
+const CameraPanel = styled.div`
+  margin-top: 10px;
+  max-width: 360px;
+`
+
+const CameraVideo = styled.video`
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: #020813;
+`
+
+const CameraControls = styled.div`
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+`
+
+const CancelButton = styled(CameraButton)`
+  background: rgba(255, 100, 100, 0.2);
 `
 
 const PreviewArea = styled.div`
